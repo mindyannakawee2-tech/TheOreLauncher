@@ -1,0 +1,184 @@
+import com.google.gson.*;
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import java.awt.*;
+import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.util.*;
+import java.util.List;
+
+public class TheOreLauncher extends JFrame {
+    private static final String OWNER = "mindyannakawee2-tech";
+    private static final String REPO = "TheOreReleases";
+    private static final String API = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/releases";
+    private static final Path VERSIONS = Path.of(System.getProperty("user.home"), ".local", "share", "TheOre", "versions");
+    private static final Color BG = new Color(22, 27, 35), PANEL = new Color(32, 40, 51);
+    private static final Color GOLD = new Color(238, 192, 108), WHITE = new Color(235, 240, 244);
+    private final JComboBox<Release> versions = new JComboBox<>();
+    private final JButton play = new JButton("PLAY / INSTALL"), refresh = new JButton("Refresh releases");
+    private final JLabel status = new JLabel("Checking releases...");
+    private final JProgressBar progress = new JProgressBar(0, 100);
+    private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
+        .connectTimeout(Duration.ofSeconds(12)).build();
+    private record Asset(String name, URI uri, long size) {}
+    private record Release(String tag, String label, Asset jar, Asset checksum) {
+        @Override public String toString() { return label + "  (" + tag + ")"; }
+    }
+    public TheOreLauncher() {
+        super("TheOre Launcher");
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setSize(850, 520);
+        setMinimumSize(new Dimension(680, 430));
+        setLocationRelativeTo(null);
+        getContentPane().setBackground(BG);
+        setLayout(new BorderLayout());
+
+        JLabel brand = new JLabel("⛏  THEORE", SwingConstants.LEFT);
+        brand.setForeground(GOLD); brand.setFont(new Font("SansSerif", Font.BOLD, 27));
+        brand.setBorder(new EmptyBorder(18, 26, 18, 26));
+        add(brand, BorderLayout.NORTH);
+
+        JPanel center = new JPanel(new GridBagLayout()); center.setBackground(PANEL);
+        center.setBorder(new EmptyBorder(30, 40, 30, 40));
+        GridBagConstraints c = new GridBagConstraints(); c.gridx=0; c.fill=GridBagConstraints.HORIZONTAL;
+        c.weightx=1; c.insets=new Insets(7, 0, 7, 0);
+        JLabel headline = new JLabel("THEORE  /  Java 2D RPG", SwingConstants.CENTER);
+        headline.setForeground(WHITE); headline.setFont(new Font("SansSerif", Font.BOLD, 27));
+        c.gridy=0; center.add(headline,c);
+        JLabel sub = new JLabel("Explore  •  Discover  •  Create", SwingConstants.CENTER);
+        sub.setForeground(new Color(173,189,199)); c.gridy=1;center.add(sub,c);
+        JLabel label = new JLabel("CHOOSE A GITHUB RELEASE");label.setForeground(GOLD);
+        c.gridy=2; c.insets=new Insets(28,0,4,0); center.add(label,c);
+        versions.setFont(new Font("SansSerif",Font.PLAIN,15));
+        c.gridy=3; c.insets=new Insets(4,0,7,0); center.add(versions,c);
+        play.setFont(new Font("SansSerif",Font.BOLD,19)); play.setBackground(new Color(56,135,84));
+        play.setForeground(Color.WHITE); play.setFocusPainted(false);
+        c.gridy=4; c.insets=new Insets(10,0,6,0);center.add(play,c);
+        refresh.setBackground(new Color(56,67,80));refresh.setForeground(WHITE);refresh.setFocusPainted(false);
+        c.gridy=5; c.insets=new Insets(3,0,7,0);center.add(refresh,c);
+        progress.setStringPainted(true);progress.setVisible(false);
+        c.gridy=6; center.add(progress,c);
+        add(center,BorderLayout.CENTER);
+        status.setForeground(new Color(190,201,211));status.setBorder(new EmptyBorder(13,22,13,22));
+        add(status,BorderLayout.SOUTH);
+        play.addActionListener(e->playSelected()); refresh.addActionListener(e->loadReleases());
+        versions.addActionListener(e->updatePlayLabel());
+        loadReleases();
+    }
+    private void busy(boolean isBusy, String message) {
+        play.setEnabled(!isBusy && versions.getSelectedItem()!=null);
+        refresh.setEnabled(!isBusy); versions.setEnabled(!isBusy);
+        status.setText(message);
+    }
+    private void updatePlayLabel() {
+        Release r=(Release)versions.getSelectedItem();
+        if(r==null){play.setEnabled(false);return;}
+        play.setEnabled(true);
+        play.setText(Files.isRegularFile(installedPath(r)) ? "PLAY THEORE" : "DOWNLOAD & PLAY");
+    }
+    private Path installedPath(Release r) { return VERSIONS.resolve(r.tag()).resolve("TheOre.jar"); }
+    private HttpResponse<String> getText(URI url) throws Exception {
+        HttpRequest req=HttpRequest.newBuilder(url).timeout(Duration.ofSeconds(25))
+            .header("User-Agent","TheOreLauncher/0.1").header("Accept","application/vnd.github+json").GET().build();
+        HttpResponse<String> resp=http.send(req,HttpResponse.BodyHandlers.ofString());
+        if(resp.statusCode()!=200) throw new IOException("HTTP " + resp.statusCode() + " from " + url.getHost());
+        return resp;
+    }
+    private void loadReleases() {
+        busy(true,"Fetching versions exclusively from GitHub: " + OWNER + "/" + REPO);
+        new SwingWorker<List<Release>,Void>() {
+            @Override protected List<Release> doInBackground() throws Exception {
+                JsonArray arr=JsonParser.parseString(getText(URI.create(API)).body()).getAsJsonArray();
+                List<Release> results=new ArrayList<>();
+                for(JsonElement item:arr){
+                    JsonObject obj=item.getAsJsonObject();
+                    if(obj.has("draft") && obj.get("draft").getAsBoolean())continue;
+                    String tag=obj.get("tag_name").getAsString();
+                    if(!tag.matches("[A-Za-z0-9._-]{1,80}"))continue;
+                    String title=obj.get("name").isJsonNull()?tag:obj.get("name").getAsString();
+                    Asset jar=null, sha=null;
+                    for(JsonElement a:obj.getAsJsonArray("assets")){
+                        JsonObject asset=a.getAsJsonObject();
+                        String name=asset.get("name").getAsString();
+                        URI uri=URI.create(asset.get("browser_download_url").getAsString());
+                        String prefix="https://github.com/"+OWNER+"/"+REPO+"/releases/download/";
+                        if(!uri.toString().startsWith(prefix))continue;
+                        Asset candidate=new Asset(name,uri,asset.get("size").getAsLong());
+                        if(name.matches("TheOre-[A-Za-z0-9._-]+\\.jar"))jar=candidate;
+                        if(name.equals("TheOre-"+tag+".jar.sha256"))sha=candidate;
+                    }
+                    if(jar!=null && sha!=null && jar.name().equals("TheOre-"+tag+".jar"))results.add(new Release(tag,title,jar,sha));
+                }
+                return results;
+            }
+            @Override protected void done(){
+                try {
+                    List<Release> releases=get();
+                    versions.removeAllItems(); for(Release r:releases)versions.addItem(r);
+                    busy(false,releases.isEmpty()?"No installable releases yet. Publish TheOre-vX.jar + matching .sha256 asset.":releases.size()+" verified-format release(s) available.");
+                    updatePlayLabel();
+                } catch(Exception ex) { versions.removeAllItems();busy(false,"Unable to load releases: "+message(ex));updatePlayLabel(); }
+            }
+        }.execute();
+    }
+    private void playSelected() {
+        Release r=(Release)versions.getSelectedItem();if(r==null)return;
+        Path installed=installedPath(r);
+        if(Files.isRegularFile(installed)){startGame(installed);return;}
+        busy(true,"Downloading " + r.tag() + "...");progress.setValue(0);progress.setVisible(true);
+        new SwingWorker<Path,Integer>() {
+            @Override protected Path doInBackground() throws Exception {
+                Files.createDirectories(installed.getParent());
+                String checksum=getText(r.checksum().uri()).body().trim();
+                String expected=checksum.split("\\s+")[0];
+                if(!expected.matches("(?i)[0-9a-f]{64}"))throw new IOException("Invalid SHA-256 checksum file");
+                Path temp=Files.createTempFile(installed.getParent(),"download-",".part");
+                try {
+                    HttpRequest request=HttpRequest.newBuilder(r.jar().uri()).timeout(Duration.ofMinutes(5))
+                        .header("User-Agent","TheOreLauncher/0.1").GET().build();
+                    HttpResponse<InputStream> response=http.send(request,HttpResponse.BodyHandlers.ofInputStream());
+                    if(response.statusCode()!=200)throw new IOException("Download failed: HTTP "+response.statusCode());
+                    MessageDigest digest=MessageDigest.getInstance("SHA-256");
+                    long total=0;
+                    try(InputStream in=response.body();OutputStream out=Files.newOutputStream(temp)){
+                        byte[] buffer=new byte[65536];int n;
+                        while((n=in.read(buffer))!=-1){
+                            out.write(buffer,0,n); digest.update(buffer,0,n);total+=n;
+                            if(r.jar().size()>0)publish((int)Math.min(100,total*100/r.jar().size()));
+                        }
+                    }
+                    String actual=HexFormat.of().formatHex(digest.digest());
+                    if(!expected.equalsIgnoreCase(actual))throw new SecurityException("SHA-256 mismatch: download not installed");
+                    Files.move(temp,installed,StandardCopyOption.REPLACE_EXISTING);
+                    return installed;
+                }finally{Files.deleteIfExists(temp);}
+            }
+            @Override protected void process(List<Integer> values){progress.setValue(values.getLast());}
+            @Override protected void done(){
+                progress.setVisible(false);
+                try {Path path=get();busy(false,"SHA-256 verified. Installed " + r.tag());updatePlayLabel();startGame(path);}
+                catch(Exception ex){busy(false,"Install failed: "+message(ex));updatePlayLabel();}
+            }
+        }.execute();
+    }
+    private void startGame(Path jar) {
+        try {
+            Path javaExe=Path.of(System.getProperty("java.home"),"bin","java");
+            new ProcessBuilder(javaExe.toString(),"-jar",jar.toAbsolutePath().toString())
+                .directory(jar.getParent().toFile()).inheritIO().start();
+            status.setText("Game launched: " + jar.getParent().getFileName());
+        }catch(IOException ex){status.setText("Could not launch game: "+ex.getMessage());}
+    }
+    private static String message(Exception ex){
+        Throwable t=ex;while(t.getCause()!=null)t=t.getCause();return String.valueOf(t.getMessage());
+    }
+    public static void main(String[] args){
+        try {UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());}catch(Exception ignored){}
+        SwingUtilities.invokeLater(()->new TheOreLauncher().setVisible(true));
+    }
+}
