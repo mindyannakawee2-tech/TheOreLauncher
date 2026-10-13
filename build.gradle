@@ -1,5 +1,0 @@
-plugins { id 'application' }
-repositories { mavenCentral() }
-dependencies { implementation 'com.google.code.gson:gson:2.13.1' }
-java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
-application { mainClass = 'TheOreLauncher' }
